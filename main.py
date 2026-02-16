@@ -16,7 +16,7 @@ import shutil
 # =================================================
 # PATHS
 # =================================================
-BASE = Path(r"PATH")
+BASE = Path(r"C:\Users\PC\OneDrive\Perso\buy\HS2026\files")
 
 MAME_EXE = BASE / "mame.exe"
 
@@ -85,9 +85,15 @@ def normalize(text):
     return re.sub(r"\s*\(.*?\)", "", (text or "").strip())
 
 def pick_manufacturer(raw):
-    for part in re.split(r"\s*/\s*|\s*&\s*|\s*\+\s*", raw or ""):
-        p = normalize(part)
-        if p in PRIORITY:
+    if not raw:
+        return None
+    
+    # We use lower() to ensure "DATA EAST" and "Data East" both match
+    mfg_text = raw.lower().strip()
+    
+    for p in PRIORITY:
+        # This catches "Data East", "Data East USA", "Export / Data East", etc.
+        if p.lower() in mfg_text:
             return p
     return None
 
