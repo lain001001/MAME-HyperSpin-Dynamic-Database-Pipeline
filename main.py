@@ -72,7 +72,10 @@ REMOVE_GAMES = {
     "re800ea", "rcirulet", "multiped", "decodark15", "decodark",
     "supdrapo", "supdrapoa", "cbtime", "cburnrubj", "clocknchj",
     "mag_time", "20pacgal", "20pacgalr0", "20pacgalr1", "20pacgalr2",
-    "20pacgalr3", "20pacgalr4", "solarwar", "invqix"
+    "20pacgalr3", "20pacgalr4", "solarwar", "invqix", "galsnew", "cburnrub",
+    "koikoip2", "atetrisc", "atetrisc2", "chamburger", "csweetht",
+    "grdnstrmg", "headonn", "setaroula", "turbo", "turbob", "turbobl",
+    "turboc", "turbod", "turboe"
 }
 
 # =================================================
@@ -155,7 +158,7 @@ def create_hs_node(machine):
     return g
 
 # =================================================
-# 2) BUILD NAOMI & ATOMISWAVE LISTS
+# 2) BUILD NAOMI & ATOMISWAVE LIST
 # =================================================
 print("Building Naomi and Atomiswave lists...")
 naomi_menu = ET.Element("menu")
