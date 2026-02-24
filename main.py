@@ -73,7 +73,7 @@ REMOVE_GAMES = {
     "supdrapo", "supdrapoa", "cbtime", "cburnrubj", "clocknchj",
     "mag_time", "20pacgal", "20pacgalr0", "20pacgalr1", "20pacgalr2",
     "20pacgalr3", "20pacgalr4", "25pacmano", "solarwar", "invqix",
-    "setaroula", "atetrisc", "atetrisc2", "bronx"
+    "setaroula", "atetrisc", "atetrisc2", "bronx", "25pacmano"
 }
 
 # =================================================
@@ -280,6 +280,96 @@ indent(final_vertical_menu)
 ET.ElementTree(final_vertical_menu).write(VERTICAL_XML, encoding="utf-8", xml_declaration=True)
 
 # =================================================
+# 4.5) FIX ORPHAN CLONES (VERTICAL ONLY)
+# =================================================
+print("Fixing orphan clones inside Vertical database...")
+
+# Ignore DDP completely
+IGNORE_ORPHAN_FIX = {"ddp3", "ddpdojblk"}
+
+# Build official clone groups (MAME order preserved)
+official_clone_groups = defaultdict(list)
+for machine in mame_root.findall("machine"):
+    name = machine.get("name")
+    parent = machine.get("cloneof")
+    if parent:
+        official_clone_groups[parent].append(name)
+
+# Build quick lookup for vertical games
+vertical_games = {g.get("name"): g for g in final_vertical_menu.findall("game")}
+
+unique_promoted = []
+multi_groups = {}
+
+for parent, clones in official_clone_groups.items():
+
+    if parent in IGNORE_ORPHAN_FIX:
+        continue
+
+    present_clones = [c for c in clones if c in vertical_games]
+
+    # Parent missing but clones present → orphan case
+    if present_clones and parent not in vertical_games:
+
+        if len(present_clones) == 1:
+            # UNIQUE ORPHAN
+            node = vertical_games[present_clones[0]]
+            clone_node = node.find("cloneof")
+            if clone_node is not None:
+                clone_node.text = ""
+
+            unique_promoted.append(present_clones[0])
+
+        else:
+            # MULTIPLE ORPHANS
+            # First in MAME order becomes parent
+            new_parent = present_clones[0]
+
+            # Promote first
+            node = vertical_games[new_parent]
+            clone_node = node.find("cloneof")
+            if clone_node is not None:
+                clone_node.text = ""
+
+            # Others point to new parent
+            for c in present_clones[1:]:
+                node = vertical_games[c]
+                clone_node = node.find("cloneof")
+                if clone_node is not None:
+                    clone_node.text = new_parent
+
+            multi_groups[new_parent] = present_clones[1:]
+
+print("  ✔ Orphan fix complete.")
+
+print("\n--- UNIQUE ORPHANS PROMOTED ---")
+if unique_promoted:
+    for name in sorted(unique_promoted):
+        print("  ", name)
+else:
+    print("  None")
+
+print("\n--- MULTI-ORPHAN GROUPS REBUILT ---")
+if multi_groups:
+    for parent, children in multi_groups.items():
+        print(f"\n  New Parent: {parent}")
+        for c in children:
+            print("     -", c)
+else:
+    print("  None")
+
+print("\nTotal unique promoted:", len(unique_promoted))
+print("Total multi groups rebuilt:", len(multi_groups))
+
+# Rewrite Vertical XML after orphan fixes
+indent(final_vertical_menu)
+ET.ElementTree(final_vertical_menu).write(
+    VERTICAL_XML,
+    encoding="utf-8",
+    xml_declaration=True
+)
+
+# =================================================
 # 5) SPLITS (GENRE / MANUFACTURER)
 # =================================================
 root = final_vertical_menu
@@ -406,3 +496,57 @@ print(f"✔ DAT generated with {len(total_set)} total entries.")
 print(f"  ({len(required_parents - allowed_names)} hidden parents added to ensure Merged sets run correctly.)")
 
 print("\n✔ ALL STEPS COMPLETE")
+
+"""
+%runfile C:/Users/PC/OneDrive/Perso/buy/HS2026/code/untitled7.py --wdir
+Generating mame.xml...
+Patching ddpsdoj.xml into MAME database...
+  ✔ ddpsdoj injected successfully.
+Patching ketmatsuri.xml into MAME database...
+  ✔ ketmatsuri injected successfully.
+Building Naomi and Atomiswave lists...
+Merging all sources into main HyperSpin DB...
+Applying DDP Parent/Clone swap in HyperSpin XML...
+Creating Vertical Database...
+Fixing orphan clones inside Vertical database...
+  ✔ Orphan fix complete.
+
+--- UNIQUE ORPHANS PROMOTED ---
+   cannballv
+   chamburger
+   csweetht
+   dtrvwz5v
+   headon2sl
+   headonn
+   phrcrazev
+   statriv2v
+   tictacv
+   trvwz3v
+   trvwzv
+
+--- MULTI-ORPHAN GROUPS REBUILT ---
+
+  New Parent: rallyxeg
+     - rallyxtd
+
+  New Parent: grdnstrmg
+     - grdnstrmj
+     - grdnstrmk
+     - grdnstrmv
+     - redfoxwp2
+     - redfoxwp2a
+
+  New Parent: hexpool
+     - hexpoola
+
+  New Parent: trvwz4v
+     - trvwz4va
+
+Total unique promoted: 11
+Total multi groups rebuilt: 4
+Generating MAMEclrmame.xml with Parent Integrity...
+✔ DAT generated with 3040 total entries.
+  (15 hidden parents added to ensure Merged sets run correctly.)
+
+✔ ALL STEPS COMPLETE
+"""
