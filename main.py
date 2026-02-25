@@ -73,7 +73,8 @@ REMOVE_GAMES = {
     "supdrapo", "supdrapoa", "cbtime", "cburnrubj", "clocknchj",
     "mag_time", "20pacgal", "20pacgalr0", "20pacgalr1", "20pacgalr2",
     "20pacgalr3", "20pacgalr4", "25pacmano", "solarwar", "invqix",
-    "setaroula", "atetrisc", "atetrisc2", "bronx", "25pacmano"
+    "setaroula", "atetrisc", "atetrisc2", "bronx", "25pacmano",
+    "chamburger", "csweetht"
 }
 
 # =================================================
@@ -496,57 +497,3 @@ print(f"✔ DAT generated with {len(total_set)} total entries.")
 print(f"  ({len(required_parents - allowed_names)} hidden parents added to ensure Merged sets run correctly.)")
 
 print("\n✔ ALL STEPS COMPLETE")
-
-"""
-%runfile C:/Users/PC/OneDrive/Perso/buy/HS2026/code/untitled7.py --wdir
-Generating mame.xml...
-Patching ddpsdoj.xml into MAME database...
-  ✔ ddpsdoj injected successfully.
-Patching ketmatsuri.xml into MAME database...
-  ✔ ketmatsuri injected successfully.
-Building Naomi and Atomiswave lists...
-Merging all sources into main HyperSpin DB...
-Applying DDP Parent/Clone swap in HyperSpin XML...
-Creating Vertical Database...
-Fixing orphan clones inside Vertical database...
-  ✔ Orphan fix complete.
-
---- UNIQUE ORPHANS PROMOTED ---
-   cannballv
-   chamburger
-   csweetht
-   dtrvwz5v
-   headon2sl
-   headonn
-   phrcrazev
-   statriv2v
-   tictacv
-   trvwz3v
-   trvwzv
-
---- MULTI-ORPHAN GROUPS REBUILT ---
-
-  New Parent: rallyxeg
-     - rallyxtd
-
-  New Parent: grdnstrmg
-     - grdnstrmj
-     - grdnstrmk
-     - grdnstrmv
-     - redfoxwp2
-     - redfoxwp2a
-
-  New Parent: hexpool
-     - hexpoola
-
-  New Parent: trvwz4v
-     - trvwz4va
-
-Total unique promoted: 11
-Total multi groups rebuilt: 4
-Generating MAMEclrmame.xml with Parent Integrity...
-✔ DAT generated with 3040 total entries.
-  (15 hidden parents added to ensure Merged sets run correctly.)
-
-✔ ALL STEPS COMPLETE
-"""
