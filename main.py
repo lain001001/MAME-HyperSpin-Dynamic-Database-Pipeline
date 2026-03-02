@@ -66,7 +66,7 @@ REMOVE_GAMES = {
     "cdsteljn", "ron2", "luckyrlt", "msjiken", "telmahjn",
     "aerofgtsg", "brvbladeg", "cburnrub2", "cruisin5", "cdiscon1",
     "kas89", "cpsoccerj", "cpsoccer", "cptennis", "cptennisj",
-    "sidewndr", "spellbnd", "sdtennis", "supdrapob", "setaroul",
+    "sidewndr", "spellbnd", "supdrapob", "setaroul",
     "sidampkr", "sidampkra", "39in1", "4in1", "decodark16",
     "decomult", "sspacaho", "twinbeeb", "shikigama", "re800v1",
     "re800ea", "rcirulet", "multiped", "decodark15", "decodark",
