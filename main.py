@@ -1,570 +1,649 @@
 """
 FULL MAME / HYPERSPIN DATABASE PIPELINE
-FINAL – COMPLETE – STABLE – DYNAMIC INJECTION
-OPTIMIZED VERSION
-"""
+OPTIMIZED + REFACTORED VERSION
 
-# =================================================
-# IMPORTS
-# =================================================
-import subprocess
-import xml.etree.ElementTree as ET
-from pathlib import Path
-from collections import defaultdict
+- Python 3.9+ requis (ET.indent natif)
+- lxml optionnel (pip install lxml) : parsing nettement plus rapide
+- Configuration optionnelle : pipeline_config.json à côté du script
+  (mêmes noms que les champs de la classe Config, voir plus bas)
+"""
+from __future__ import annotations
+
+import copy
+import json
+import logging
 import re
 import shutil
+import subprocess
+import sys
+import time
+from collections import defaultdict
+from dataclasses import dataclass, field, fields
+from pathlib import Path
+
+try:
+    from lxml import etree as ET
+    USE_LXML = True
+except ImportError:
+    import xml.etree.ElementTree as ET
+    USE_LXML = False
+
+log = logging.getLogger("pipeline")
+
+DEFAULT_GENRE = "Shoot-'Em-Up"
+VERTICAL_ROTATIONS = ("90", "270")
+
 
 # =================================================
-# PATHS
+# CONFIG
 # =================================================
-BASE = Path(r"C:\Users\PC\Desktop\test")
+@dataclass
+class Config:
+    base: Path = Path(r"D:/!delete/test")
+    mame_version: str = "0.289"
 
-MAME_EXE = BASE / "mame.exe"
+    # XML (une <machine>) à injecter dans la base MAME
+    inject_xmls: list = field(default_factory=lambda: ["ddpsdoj.xml", "ketmatsuri.xml"])
+    # Jeux à ajouter depuis "Mame <version> All games.xml"
+    games_to_add: list = field(default_factory=lambda: ["sbugger"])
 
-# NEW: List of XML files to inject into the MAME database
-INJECT_XMLS = [
-    BASE / "ddpsdoj.xml",
-    BASE / "ketmatsuri.xml"
-]
+    priority: list = field(default_factory=lambda: [
+        "Capcom", "Cave", "Data East", "Gaelco",
+        "Irem", "Kaneko", "Konami", "Namco",
+        "Nichibutsu", "Nintendo", "Sega",
+        "Seibu Kaihatsu", "SNK", "Taito",
+    ])
 
-# NEW: List of game ROM names to add from ALL_GAMES_XML
-GAMES_TO_ADD = [
-    "sbugger"
-]
+    remove_naomi: set = field(default_factory=lambda: {
+        "quizqgd", "shors2k1", "shorse", "shorsep", "shorsepr",
+    })
 
-DB = BASE / "databases"
-DB.mkdir(exist_ok=True)
+    remove_games: set = field(default_factory=lambda: {
+        "kbh", "kbm", "kbm2nd", "kbm3rd", "cmpmx10", "jammin",
+        "rockn", "rockn2", "rockn3", "rockn4", "rockna",
+        "re900", "re800v1a", "re800v3", "jantotsu", "daifugo",
+        "cdsteljn", "ron2", "luckyrlt", "msjiken", "telmahjn",
+        "aerofgtsg", "brvbladeg", "cburnrub2", "cruisin5", "cdiscon1",
+        "kas89", "cpsoccerj", "cpsoccer", "cptennis", "cptennisj",
+        "sidewndr", "spellbnd", "supdrapob", "setaroul",
+        "sidampkr", "sidampkra", "39in1", "4in1", "decodark16",
+        "decomult", "sspacaho", "twinbeeb", "shikigama", "re800v1",
+        "re800ea", "rcirulet", "multiped", "decodark15", "decodark",
+        "supdrapo", "supdrapoa", "cbtime", "cburnrubj", "clocknchj",
+        "mag_time", "20pacgal", "20pacgalr0", "20pacgalr1", "20pacgalr2",
+        "20pacgalr3", "20pacgalr4", "25pacmano", "solarwar", "invqix",
+        "setaroula", "atetrisc", "atetrisc2", "bronx",
+        "chamburger", "csweetht", "25pacman", "cyclshtg",
+    })
 
-MAME_XML = BASE / "mame.xml" 
-HS_XML = BASE / "Mame 0.284.xml"
-ALL_GAMES_XML = BASE / "Mame 0.284 All games.xml"
+    # Swap parent/clone DDP (un seul endroit, réutilisé pour l'exclusion des orphelins)
+    ddp_new_parent: str = "ddpdojblk"
+    ddp_old_parent: str = "ddp3"
 
-VERTICAL_XML = DB / "Mame 0.284 Vertical.xml"
-NAOMI_XML = DB / "Naomi_Vertical.xml"
-CLRMAME_XML = BASE / "MAMEclrmame.xml"
+    write_mame_xml: bool = True          # écrire mame.xml (sinon tout reste en mémoire)
+    use_hs_backup: bool = True           # source = copie d'origine .orig.xml (relance idempotente)
+    strict_manufacturer_match: bool = True  # mot entier (\b) au lieu d'une simple sous-chaîne
 
-# =================================================
-# DIRECTORY PATHS (CONSTANTS)
-# =================================================
-DIR_GENRES_VERTICAL = DB / "genres - vertical"
-DIR_MANUFACTURER_VERTICAL = DB / "manufacturer - vertical"
-DIR_MANUFACTURER_SHMUPS = DB / "manufacturer - shmups"
-DIR_MANUFACTURER_BY_GENRES = DB / "manufacturer - vertical by genres"
-DIR_GENRES_NAOMI = DB / "genres - naomi"
-DIR_FINAL = DB / "!Final"
+    # ---------- chemins dérivés ----------
+    @property
+    def mame_exe(self): return self.base / "mame.exe"
+    @property
+    def mame_xml(self): return self.base / "mame.xml"
+    @property
+    def hs_xml(self): return self.base / f"Mame {self.mame_version}.xml"
+    @property
+    def hs_backup(self): return self.base / f"Mame {self.mame_version}.orig.xml"
+    @property
+    def all_games_xml(self): return self.base / f"Mame {self.mame_version} All games.xml"
+    @property
+    def clrmame_xml(self): return self.base / "MAMEclrmame.xml"
+    @property
+    def inject_paths(self): return [self.base / n for n in self.inject_xmls]
+    @property
+    def db(self): return self.base / "databases"
+    @property
+    def vertical_xml(self): return self.db / f"Mame {self.mame_version} Vertical.xml"
+    @property
+    def naomi_xml(self): return self.db / "Naomi_Vertical.xml"
+    @property
+    def dir_genres_vertical(self): return self.db / "genres - vertical"
+    @property
+    def dir_manufacturer_vertical(self): return self.db / "manufacturer - vertical"
+    @property
+    def dir_manufacturer_shmups(self): return self.db / "manufacturer - shmups"
+    @property
+    def dir_manufacturer_by_genres(self): return self.db / "manufacturer - vertical by genres"
+    @property
+    def dir_genres_naomi(self): return self.db / "genres - naomi"
+    @property
+    def dir_final(self): return self.db / "!Final"
+    @property
+    def orphan_fix_ignore(self): return {self.ddp_new_parent, self.ddp_old_parent}
 
-DIRS = [
-    DIR_GENRES_VERTICAL,
-    DIR_MANUFACTURER_VERTICAL,
-    DIR_MANUFACTURER_SHMUPS,
-    DIR_MANUFACTURER_BY_GENRES,
-    DIR_GENRES_NAOMI
-]
-for d in DIRS: 
-    d.mkdir(exist_ok=True)
+    def ensure_dirs(self):
+        for d in (self.db, self.dir_genres_vertical, self.dir_manufacturer_vertical,
+                  self.dir_manufacturer_shmups, self.dir_manufacturer_by_genres,
+                  self.dir_genres_naomi):
+            d.mkdir(parents=True, exist_ok=True)
 
-# =================================================
-# CONSTANTS & CONFIG
-# =================================================
-PRIORITY = [
-    "Capcom","Cave","Data East","Gaelco",
-    "Irem","Kaneko","Konami","Namco",
-    "Nichibutsu","Nintendo","Sega",
-    "Seibu Kaihatsu","SNK","Taito"
-]
 
-REMOVE_NAOMI = {"quizqgd","shors2k1","shorse","shorsep","shorsepr"}
-REMOVE_GAMES = {
-    "kbh", "kbm", "kbm2nd", "kbm3rd", "cmpmx10", "jammin",
-    "rockn", "rockn2", "rockn3", "rockn4", "rockna",
-    "re900", "re800v1a", "re800v3", "jantotsu", "daifugo",
-    "cdsteljn", "ron2", "luckyrlt", "msjiken", "telmahjn",
-    "aerofgtsg", "brvbladeg", "cburnrub2", "cruisin5", "cdiscon1",
-    "kas89", "cpsoccerj", "cpsoccer", "cptennis", "cptennisj",
-    "sidewndr", "spellbnd", "supdrapob", "setaroul",
-    "sidampkr", "sidampkra", "39in1", "4in1", "decodark16",
-    "decomult", "sspacaho", "twinbeeb", "shikigama", "re800v1",
-    "re800ea", "rcirulet", "multiped", "decodark15", "decodark",
-    "supdrapo", "supdrapoa", "cbtime", "cburnrubj", "clocknchj",
-    "mag_time", "20pacgal", "20pacgalr0", "20pacgalr1", "20pacgalr2",
-    "20pacgalr3", "20pacgalr4", "25pacmano", "solarwar", "invqix",
-    "setaroula", "atetrisc", "atetrisc2", "bronx", "25pacmano",
-    "chamburger", "csweetht", "25pacman", "cyclshtg"
-}
+def load_config() -> Config:
+    cfg = Config()
+    path = Path(__file__).with_name("pipeline_config.json")
+    if not path.exists():
+        return cfg
+    data = json.loads(path.read_text(encoding="utf-8"))
+    valid = {f.name for f in fields(Config)}
+    for key, value in data.items():
+        if key not in valid:
+            log.warning("Config: clé inconnue ignorée : %s", key)
+            continue
+        if key == "base":
+            value = Path(value)
+        elif key in ("remove_naomi", "remove_games"):
+            value = set(value)
+        setattr(cfg, key, value)
+    log.info("Config chargée depuis %s", path.name)
+    return cfg
 
-IGNORE_ORPHAN_FIX = {"ddp3", "ddpdojblk"}
 
 # =================================================
 # HELPERS
 # =================================================
 def clean_filename(text):
-    return re.sub(r'[\\/:*?"<>|]', '', (text or "").strip()) or "Unknown"
+    return re.sub(r'[\\/:*?"<>|]', "", (text or "").strip()) or "Unknown"
 
-def normalize(text):
-    return re.sub(r"\s*\(.*?\)", "", (text or "").strip())
 
-def pick_manufacturer(raw):
+def compile_priority(priority, strict=True):
+    """Pré-compile les motifs constructeurs (l'ordre de PRIORITY reste prioritaire)."""
+    patterns = []
+    for p in priority:
+        body = re.escape(p)
+        patterns.append((p, re.compile(rf"\b{body}\b" if strict else body, re.IGNORECASE)))
+    return patterns
+
+
+def pick_manufacturer(raw, patterns):
     if not raw:
         return None
-    mfg_text = raw.lower().strip()
-    for p in PRIORITY:
-        if p.lower() in mfg_text:
-            return p
+    for name, pat in patterns:
+        if pat.search(raw):
+            return name
     return None
 
-def indent(elem, level=0):
-    """Format XML with proper indentation"""
-    i = "\n" + level * "    "
-    if len(elem):
-        if not elem.text or not elem.text.strip():
-            elem.text = i + "    "
-        for c in elem:
-            indent(c, level + 1)
-        if not elem.tail or not elem.tail.strip():
-            elem.tail = i
-    elif level and (not elem.tail or not elem.tail.strip()):
-        elem.tail = i
 
-def write_xml(filepath, root, verbose=True):
-    """Wrapper: indent + write XML in one operation"""
-    indent(root)
-    ET.ElementTree(root).write(filepath, encoding="utf-8", xml_declaration=True)
-    if verbose:
-        print(f"  ✔ Written to {filepath.name}")
+def parse_file(path):
+    if USE_LXML:
+        return ET.parse(str(path), ET.XMLParser(huge_tree=True)).getroot()
+    return ET.parse(path).getroot()
 
-def create_game_node(machine, lookup=None):
+
+def parse_bytes(data):
+    if USE_LXML:
+        return ET.fromstring(data, ET.XMLParser(huge_tree=True))
+    return ET.fromstring(data)
+
+
+def load_xml(path):
+    """Parse un fichier XML UNE seule fois. Retourne la racine ou None (avec warning)."""
+    if not path.exists():
+        log.warning("%s introuvable, ignoré.", path.name)
+        return None
+    try:
+        return parse_file(path)
+    except ET.ParseError as e:
+        log.warning("%s est mal formé : %s, ignoré.", path.name, e)
+        return None
+
+
+def write_xml(path, root):
+    ET.indent(root, space="    ")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    ET.ElementTree(root).write(str(path), encoding="utf-8", xml_declaration=True)
+
+
+def write_menu(path, games):
+    """Écrit un <menu> à partir de copies des nœuds (évite le partage de nœuds entre fichiers)."""
+    menu = ET.Element("menu")
+    menu.extend(copy.deepcopy(g) for g in games)
+    write_xml(path, menu)
+
+
+def resolve_genre(machine, all_games):
+    genre = (machine.findtext("genre") or "").strip()
+    if not genre and all_games is not None:
+        ref = all_games.get(machine.get("name"))
+        if ref is not None:
+            genre = (ref.findtext("genre") or "").strip()
+    return genre or DEFAULT_GENRE
+
+
+def create_game_node(machine, all_games=None):
     """
-    UNIFIED function: convert MAME machine or game element to HyperSpin game node
-    lookup: optional dict to find genre if not in machine
+    Convertit une <machine> MAME ou un <game> HyperSpin en nœud <game> HyperSpin.
+    cloneof est lu en attribut (MAME) OU en sous-élément (HyperSpin).
     """
     name = machine.get("name")
     g = ET.Element("game", name=name, index="", image="")
-    
-    for t in ("description", "manufacturer", "year"):
-        ET.SubElement(g, t).text = machine.findtext(t) or ""
-    
-    genre = machine.findtext("genre") or ""
-    if not genre and lookup:
-        genre = lookup.get(name, "Shoot-'Em-Up")
-    elif not genre:
-        genre = "Shoot-'Em-Up"
-    
-    ET.SubElement(g, "genre").text = genre
-    ET.SubElement(g, "cloneof").text = machine.get("cloneof") or ""
+    for tag in ("description", "manufacturer", "year"):
+        ET.SubElement(g, tag).text = machine.findtext(tag) or ""
+    ET.SubElement(g, "genre").text = resolve_genre(machine, all_games)
+    cloneof = machine.get("cloneof") or (machine.findtext("cloneof") or "").strip()
+    ET.SubElement(g, "cloneof").text = cloneof
     ET.SubElement(g, "crc").text = ""
     ET.SubElement(g, "rating").text = ""
     ET.SubElement(g, "enabled").text = "Yes"
-    
     return g
 
-def validate_xml_file(filepath):
-    """Check if XML file exists and is readable"""
-    if not filepath.exists():
-        print(f"  ⚠ WARNING: {filepath.name} not found, skipping...")
-        return False
+
+# =================================================
+# 0) PRÉ-VÉRIFICATIONS
+# =================================================
+def check_inputs(cfg):
+    ok = True
+    if not cfg.mame_exe.exists():
+        log.error("mame.exe introuvable : %s", cfg.mame_exe)
+        ok = False
+    if not cfg.all_games_xml.exists():
+        log.error("Fichier requis introuvable : %s", cfg.all_games_xml)
+        ok = False
+    if not (cfg.hs_xml.exists() or (cfg.use_hs_backup and cfg.hs_backup.exists())):
+        log.error("Base HyperSpin introuvable : %s", cfg.hs_xml)
+        ok = False
+    if not ok:
+        sys.exit(1)
+
+
+# =================================================
+# 1) MAME.XML : GÉNÉRATION EN MÉMOIRE + INDEX EN UNE PASSE
+# =================================================
+def generate_mame_root(cfg):
+    log.info("Génération de la base MAME (-listxml, en mémoire)...")
     try:
-        ET.parse(filepath)
+        proc = subprocess.run(
+            [str(cfg.mame_exe), "-listxml"],
+            stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+            check=True, cwd=str(cfg.base),
+        )
+    except (OSError, subprocess.CalledProcessError) as e:
+        log.error("Échec de mame -listxml : %s", e)
+        sys.exit(1)
+    return parse_bytes(proc.stdout)
+
+
+class MameIndex:
+    """Toutes les structures dérivées de la base MAME, remplies en UNE seule passe."""
+
+    def __init__(self, remove_naomi):
+        self.remove_naomi = remove_naomi
+        self.machines = {}                      # nom -> <machine>
+        self.vertical = set()                   # noms des machines verticales
+        self.clone_groups = defaultdict(list)   # parent -> clones (ordre MAME)
+        self.naomi = []                         # <machine> Naomi verticales
+        self.atomiswave = []                    # <machine> Atomiswave verticales
+
+    def add(self, m):
+        name = m.get("name")
+        self.machines[name] = m
+
+        parent = m.get("cloneof")
+        if parent:
+            self.clone_groups[parent].append(name)
+
+        disp = m.find("display")
+        if disp is None or disp.get("rotate") not in VERTICAL_ROTATIONS:
+            return
+        self.vertical.add(name)
+
+        source = (m.get("sourcefile") or "").lower()
+        if source.endswith("naomi.cpp") and name not in self.remove_naomi:
+            self.naomi.append(m)
+        if source == "sega/dc_atomiswave.cpp":
+            self.atomiswave.append(m)
+
+
+def inject_machines(cfg, mame_root, index):
+    """Injecte les XML custom dans la base MAME. Les nœuds sont ajoutés puis indexés."""
+    injected = []
+    for xml_path in cfg.inject_paths:
+        root = load_xml(xml_path)
+        if root is None:
+            continue
+        candidates = [root] if root.tag == "machine" else root.findall("machine")
+        if not candidates:
+            log.warning("%s ne contient aucune <machine>, ignoré.", xml_path.name)
+            continue
+        log.info("Patch de %s dans la base MAME...", xml_path.name)
+        for m in candidates:
+            name = m.get("name")
+            if name in index.machines:
+                log.warning("  %s existe déjà dans la base MAME, ignoré.", name)
+                continue
+            mame_root.append(m)
+            index.add(m)
+            injected.append(m)
+            log.info("  %s injecté.", name)
+    return injected
+
+
+# =================================================
+# 2) BASE HYPERSPIN : FUSION, PARENTS MANQUANTS, SWAP DDP, TRI
+# =================================================
+def prepare_hs_source(cfg):
+    """
+    La base d'origine est sauvegardée une fois (.orig.xml) et sert de source à chaque
+    exécution : relancer le script repart toujours de l'original (idempotent).
+    Pour partir d'une nouvelle base d'origine, supprimer le fichier .orig.xml.
+    """
+    if not cfg.use_hs_backup:
+        return cfg.hs_xml
+    if not cfg.hs_backup.exists():
+        shutil.copy2(cfg.hs_xml, cfg.hs_backup)
+        log.info("Sauvegarde de la base d'origine : %s", cfg.hs_backup.name)
+    return cfg.hs_backup
+
+
+def fix_missing_parents(hs_root, games, all_games):
+    """Ajoute les parents manquants, de façon itérative (parents de parents), sans doublon."""
+    added = []
+    pending = list(games.values())
+    while pending:
+        node = pending.pop()
+        parent = (node.findtext("cloneof") or "").strip()
+        if not parent or parent in games:
+            continue
+        src = all_games.get(parent)
+        if src is None:
+            log.warning("  Parent '%s' (requis par '%s') absent de %s",
+                        parent, node.get("name"), "All games")
+            continue
+        new = create_game_node(src, all_games)
+        hs_root.append(new)
+        games[parent] = new          # le nœud créé, pas l'élément source
+        added.append((node.get("name"), parent))
+        pending.append(new)          # son propre parent sera vérifié à son tour
+    return added
+
+
+def apply_ddp_swap(games, new_parent, old_parent):
+    for name, g in games.items():
+        node = g.find("cloneof")
+        if node is None:
+            continue
+        if name == new_parent:
+            node.text = ""
+        elif name == old_parent:
+            node.text = new_parent
+        elif (node.text or "").strip() == old_parent:
+            node.text = new_parent
+
+
+def build_hs_db(cfg, index, injected, all_games):
+    log.info("Fusion de toutes les sources dans la base HyperSpin...")
+    hs_root = parse_file(prepare_hs_source(cfg))
+    games = {g.get("name"): g for g in hs_root.iterfind("game")}
+
+    def add(node):
+        name = node.get("name")
+        if name in games:
+            return False
+        hs_root.append(node)
+        games[name] = node
         return True
-    except ET.ParseError as e:
-        print(f"  ⚠ WARNING: {filepath.name} is malformed: {e}, skipping...")
-        return False
 
-# =================================================
-# 1) GENERATE & PATCH MAME.XML
-# =================================================
-print("Generating mame.xml...")
-with open(MAME_XML, "w", encoding="utf-8") as f:
-    subprocess.run([MAME_EXE, "-listxml"], stdout=f, stderr=subprocess.DEVNULL, check=True)
+    # A) jeux injectés
+    for m in injected:
+        add(create_game_node(m, all_games))
+    # B) Naomi  C) Atomiswave
+    for m in index.naomi:
+        add(create_game_node(m, all_games))
+    for m in index.atomiswave:
+        add(create_game_node(m, all_games))
 
-mame_tree = ET.parse(MAME_XML)
-mame_root = mame_tree.getroot()
-
-# Track injected elements to add them to HyperSpin later
-injected_nodes_for_hs = []
-
-for xml_path in INJECT_XMLS:
-    if validate_xml_file(xml_path):
-        print(f"Patching {xml_path.name} into MAME database...")
-        inject_element = ET.parse(xml_path).getroot() 
-        game_name = inject_element.get('name')
-        
-        if mame_root.find(f".//machine[@name='{game_name}']") is None:
-            mame_root.append(inject_element)
-            injected_nodes_for_hs.append(inject_element)
-            print(f"  ✔ {game_name} injected successfully.")
+    # D) jeux personnalisés
+    log.info("Ajout des jeux de games_to_add...")
+    for rom in cfg.games_to_add:
+        src = all_games.get(rom)
+        if src is None:
+            log.error("  '%s' INTROUVABLE dans %s", rom, cfg.all_games_xml.name)
+        elif add(create_game_node(src, all_games)):
+            log.info("  '%s' ajouté.", rom)
         else:
-            print(f"  ⚠ {game_name} already exists in MAME database, skipping...")
+            log.warning("  '%s' existe déjà, ignoré.", rom)
 
-write_xml(MAME_XML, mame_root, verbose=False)
+    # E) parents manquants
+    log.info("Vérification des parents manquants...")
+    added = fix_missing_parents(hs_root, games, all_games)
+    for child, parent in added:
+        log.info("  parent '%s' ajouté (requis par '%s')", parent, child)
+    if not added:
+        log.info("  aucun parent manquant")
 
-# =================================================
-# LOAD COMPLETE GAME LOOKUP (ONE TIME ONLY)
-# =================================================
-print("Loading complete game database for lookups...")
-if not validate_xml_file(ALL_GAMES_XML):
-    print("ERROR: Cannot load ALL_GAMES_XML, aborting...")
-    exit(1)
+    # F) swap DDP
+    log.info("Swap parent/clone DDP (%s <-> %s)...", cfg.ddp_old_parent, cfg.ddp_new_parent)
+    apply_ddp_swap(games, cfg.ddp_new_parent, cfg.ddp_old_parent)
 
-all_games_tree = ET.parse(ALL_GAMES_XML)
-all_games_root = all_games_tree.getroot()
+    # G) tri alphabétique
+    sorted_games = sorted(games.values(), key=lambda g: g.get("name").lower())
+    new_root = ET.Element("menu")
+    new_root.extend(sorted_games)
+    write_xml(cfg.hs_xml, new_root)
+    return new_root
 
-# Create single lookup dict
-lookup = {g.get("name"): g.findtext("genre") for g in all_games_root.findall("game")}
-all_games_dict = {g.get("name"): g for g in all_games_root.findall("game")}
-
-# =================================================
-# 2) BUILD NAOMI & ATOMISWAVE LIST
-# =================================================
-print("Building Naomi and Atomiswave lists...")
-naomi_menu = ET.Element("menu")
-atomis_list = []
-
-for m in mame_root.findall("machine"):
-    source = m.get("sourcefile", "").lower()
-    disp = m.find("display")
-    if disp is None or disp.get("rotate") not in ("90", "270"):
-        continue
-
-    if source.endswith("naomi.cpp") and m.get("name") not in REMOVE_NAOMI:
-        naomi_menu.append(create_game_node(m, lookup))
-    
-    if source == "sega/dc_atomiswave.cpp":
-        atomis_list.append(create_game_node(m, lookup))
-
-# Save Naomi Vertical DB
-write_xml(NAOMI_XML, naomi_menu)
-
-# Pre-compute vertical names set for section 4
-vertical_names = {m.get("name") for m in mame_root.findall("machine") 
-                  if m.find("display") is not None and m.find("display").get("rotate") in ("90", "270")}
 
 # =================================================
-# 3) MERGE INTO MAIN HS DB & SORT
+# 3) VERTICAL + CORRECTION DES ORPHELINS
 # =================================================
-print("Merging all sources into main HyperSpin DB...")
-hs_tree = ET.parse(HS_XML)
-hs_root = hs_tree.getroot()
-existing = {g.get("name") for g in hs_root.findall("game")}
+def build_vertical(cfg, hs_root, vertical_names):
+    log.info("Création de la base Vertical...")
+    menu = ET.Element("menu")
+    for g in hs_root.iterfind("game"):
+        name = g.get("name")
+        parent = (g.findtext("cloneof") or "").strip() or name
+        if (parent in vertical_names or name in vertical_names) and name not in cfg.remove_games:
+            menu.append(copy.deepcopy(g))   # copie : la base HS n'est pas modifiée
+    return menu
 
-# A) Add CUSTOM INJECTED games (ddpsdoj, ketmatsuri)
-for node in injected_nodes_for_hs:
-    if node.get("name") not in existing:
-        hs_root.append(create_game_node(node, lookup))
-        existing.add(node.get("name"))
 
-# B) Add Naomi games
-for g in naomi_menu.findall("game"):
-    if g.get("name") not in existing:
-        hs_root.append(g)
-        existing.add(g.get("name"))
+def fix_orphan_clones(vertical_menu, clone_groups, ignore):
+    log.info("Correction des clones orphelins (Vertical)...")
+    vertical = {g.get("name"): g for g in vertical_menu.iterfind("game")}
 
-# C) Add Atomiswave games
-for g in atomis_list:
-    if g.get("name") not in existing:
-        hs_root.append(g)
-        existing.add(g.get("name"))
+    def set_parent(name, parent):
+        node = vertical[name].find("cloneof")
+        if node is not None:
+            node.text = parent
 
-# =================================================
-# 3.4) ADD CUSTOM GAMES FROM GAMES_TO_ADD
-# =================================================
-print("Adding custom games from GAMES_TO_ADD...")
-
-for rom_name in GAMES_TO_ADD:
-    if rom_name in all_games_dict:
-        if rom_name not in existing:
-            game_elem = all_games_dict[rom_name]
-            hs_root.append(create_game_node(game_elem, lookup))
-            existing.add(rom_name)
-            print(f"  ✔ Added '{rom_name}' to database")
+    unique_promoted, multi_groups = [], {}
+    for parent, clones in clone_groups.items():
+        if parent in ignore or parent in vertical:
+            continue
+        present = [c for c in clones if c in vertical]
+        if not present:
+            continue
+        if len(present) == 1:
+            set_parent(present[0], "")
+            unique_promoted.append(present[0])
         else:
-            print(f"  ⚠ '{rom_name}' already exists in database, skipping")
+            new_parent = present[0]
+            set_parent(new_parent, "")
+            for c in present[1:]:
+                set_parent(c, new_parent)
+            multi_groups[new_parent] = present[1:]
+
+    log.info("--- ORPHELINS UNIQUES PROMUS ---")
+    for name in sorted(unique_promoted) or ["(aucun)"]:
+        log.info("   %s", name)
+    log.info("--- GROUPES MULTI-ORPHELINS RECONSTRUITS ---")
+    if multi_groups:
+        for parent, children in multi_groups.items():
+            log.info("  Nouveau parent : %s", parent)
+            for c in children:
+                log.info("     - %s", c)
     else:
-        print(f"  ❌ '{rom_name}' NOT FOUND in {ALL_GAMES_XML.name}")
+        log.info("   (aucun)")
+    log.info("Total promus : %d | groupes reconstruits : %d",
+             len(unique_promoted), len(multi_groups))
+
 
 # =================================================
-# 3.5) FIX MISSING PARENTS IN HS XML
+# 4) DÉCOUPAGES GENRE / CONSTRUCTEUR (UNE PASSE)
 # =================================================
-print("Checking for missing parents in HyperSpin database...")
+def export_splits(cfg, vertical_menu, naomi_nodes, patterns):
+    log.info("Création des bases découpées (une passe)...")
+    by_genre = defaultdict(list)
+    by_manu = defaultdict(list)
+    shmup_by_manu = defaultdict(list)
+    manu_by_genre = defaultdict(lambda: defaultdict(list))
 
-hs_games = {g.get("name"): g for g in hs_root.findall("game")}
-missing_parents = []
+    for g in vertical_menu.iterfind("game"):
+        genre = g.findtext("genre") or "Unknown"
+        genre_file = clean_filename(genre)
+        manu = pick_manufacturer(g.findtext("manufacturer"), patterns)
 
-for game_name, game_elem in hs_games.items():
-    parent_name = (game_elem.findtext("cloneof") or "").strip()
-    
-    if parent_name and parent_name not in hs_games:
-        if parent_name in all_games_dict:
-            missing_parents.append((game_name, parent_name, all_games_dict[parent_name]))
+        by_genre[genre_file].append(g)
+        if manu:
+            by_manu[manu].append(g)
+            manu_by_genre[manu][genre_file].append(g)
+            if "Shoot-'Em-Up" in genre:
+                shmup_by_manu[manu].append(g)
 
-for child_name, parent_name, parent_elem in missing_parents:
-    hs_root.append(create_game_node(parent_elem, lookup))
-    hs_games[parent_name] = parent_elem
-    print(f"  ✔ Added missing parent '{parent_name}' (needed by '{child_name}')")
+    for genre, games in by_genre.items():
+        write_menu(cfg.dir_genres_vertical / f"{genre}.xml", games)
+    for manu, games in by_manu.items():
+        write_menu(cfg.dir_manufacturer_vertical / f"{manu}.xml", games)
+    for manu, games in shmup_by_manu.items():
+        write_menu(cfg.dir_manufacturer_shmups / f"{manu}.xml", games)
+    for manu, genres in manu_by_genre.items():
+        for genre, games in genres.items():
+            write_menu(cfg.dir_manufacturer_by_genres / manu / f"{genre}.xml", games)
 
-if not missing_parents:
-    print("  ✔ No missing parents found")
+    by_genre_naomi = defaultdict(list)
+    for g in naomi_nodes:
+        by_genre_naomi[clean_filename(g.findtext("genre"))].append(g)
+    for genre, games in by_genre_naomi.items():
+        write_menu(cfg.dir_genres_naomi / f"{genre}.xml", games)
 
-# --- RESTRUCTURE DDP RELATIONSHIPS ---
-print("Applying DDP Parent/Clone swap in HyperSpin XML...")
-NEW_PARENT = "ddpdojblk"
-OLD_PARENT = "ddp3"
-
-for g in hs_root.findall("game"):
-    name = g.get("name")
-    clone_node = g.find("cloneof")
-    
-    if name == NEW_PARENT:
-        if clone_node is not None:
-            clone_node.text = ""
-    elif name == OLD_PARENT:
-        if clone_node is not None:
-            clone_node.text = NEW_PARENT
-    elif clone_node is not None and clone_node.text == OLD_PARENT:
-        clone_node.text = NEW_PARENT
-
-# Sort everything alphabetically
-sorted_games = sorted(hs_root.findall("game"), key=lambda x: x.get("name").lower())
-new_hs_root = ET.Element("menu")
-for g in sorted_games:
-    new_hs_root.append(g)
-
-write_xml(HS_XML, new_hs_root, verbose=False)
 
 # =================================================
-# 4) FILTER VERTICAL (INCLUDES INJECTED DDPSDOJ)
+# 5) ORGANISATION FINALE
 # =================================================
-print("Creating Vertical Database...")
+def organize_final(cfg):
+    log.info("Organisation de la structure finale...")
+    final = cfg.dir_final
+    final.mkdir(parents=True, exist_ok=True)
 
-final_vertical_menu = ET.Element("menu")
-for g in new_hs_root.findall("game"):
-    name = g.get("name")
-    parent = (g.findtext("cloneof") or "").strip() or name
-    
-    if (parent in vertical_names or name in vertical_names) and name not in REMOVE_GAMES:
-        final_vertical_menu.append(g)
+    m_dir = final / "MAME"
+    m_dir.mkdir(exist_ok=True)
+    shutil.copy2(cfg.vertical_xml, m_dir / "MAME.xml")
+    for f in cfg.dir_genres_vertical.glob("*.xml"):
+        shutil.copy2(f, m_dir / f.name)
 
-write_xml(VERTICAL_XML, final_vertical_menu, verbose=False)
+    n_dir = final / "Sega Naomi"
+    n_dir.mkdir(exist_ok=True)
+    shutil.copy2(cfg.naomi_xml, n_dir / "Sega Naomi.xml")
+    for f in cfg.dir_genres_naomi.glob("*.xml"):
+        shutil.copy2(f, n_dir / f.name)
 
-# =================================================
-# 4.5) FIX ORPHAN CLONES (VERTICAL ONLY)
-# =================================================
-print("Fixing orphan clones inside Vertical database...")
+    s_dir = final / "Shoot-'Em-Up"
+    s_dir.mkdir(exist_ok=True)
+    shmup_file = cfg.dir_genres_vertical / "Shoot-'Em-Up.xml"
+    if shmup_file.exists():
+        shutil.copy2(shmup_file, s_dir / shmup_file.name)
+    for f in cfg.dir_manufacturer_shmups.glob("*.xml"):
+        shutil.copy2(f, s_dir / f.name)
 
-# Build official clone groups (MAME order preserved)
-official_clone_groups = defaultdict(list)
-for machine in mame_root.findall("machine"):
-    name = machine.get("name")
-    parent = machine.get("cloneof")
-    if parent:
-        official_clone_groups[parent].append(name)
+    for xml_file in cfg.dir_manufacturer_vertical.glob("*.xml"):
+        target = final / xml_file.stem
+        target.mkdir(exist_ok=True)
+        shutil.copy2(xml_file, target / xml_file.name)
 
-# Build quick lookup for vertical games
-vertical_games = {g.get("name"): g for g in final_vertical_menu.findall("game")}
+    if cfg.dir_manufacturer_by_genres.exists():
+        shutil.copytree(cfg.dir_manufacturer_by_genres, final, dirs_exist_ok=True)
 
-unique_promoted = []
-multi_groups = {}
-
-for parent, clones in official_clone_groups.items():
-    if parent in IGNORE_ORPHAN_FIX:
-        continue
-
-    present_clones = [c for c in clones if c in vertical_games]
-
-    if present_clones and parent not in vertical_games:
-        if len(present_clones) == 1:
-            node = vertical_games[present_clones[0]]
-            clone_node = node.find("cloneof")
-            if clone_node is not None:
-                clone_node.text = ""
-            unique_promoted.append(present_clones[0])
-        else:
-            new_parent = present_clones[0]
-            node = vertical_games[new_parent]
-            clone_node = node.find("cloneof")
-            if clone_node is not None:
-                clone_node.text = ""
-            
-            for c in present_clones[1:]:
-                node = vertical_games[c]
-                clone_node = node.find("cloneof")
-                if clone_node is not None:
-                    clone_node.text = new_parent
-            
-            multi_groups[new_parent] = present_clones[1:]
-
-print("  ✔ Orphan fix complete.")
-
-print("\n--- UNIQUE ORPHANS PROMOTED ---")
-if unique_promoted:
-    for name in sorted(unique_promoted):
-        print("  ", name)
-else:
-    print("  None")
-
-print("\n--- MULTI-ORPHAN GROUPS REBUILT ---")
-if multi_groups:
-    for parent, children in multi_groups.items():
-        print(f"\n  New Parent: {parent}")
-        for c in children:
-            print("     -", c)
-else:
-    print("  None")
-
-print(f"\nTotal unique promoted: {len(unique_promoted)}")
-print(f"Total multi groups rebuilt: {len(multi_groups)}")
-
-write_xml(VERTICAL_XML, final_vertical_menu, verbose=False)
 
 # =================================================
-# 5) UNIFIED SPLITS (GENRE / MANUFACTURER) - SINGLE PASS
+# 6) DAT CLRMAMEPRO (INTÉGRITÉ DES PARENTS)
 # =================================================
-print("Creating split databases (single pass)...")
+def build_clrmame(cfg, mame_root, index, vertical_menu, naomi_nodes, atomis_nodes):
+    log.info("Génération de MAMEclrmame.xml avec intégrité des parents...")
+    # Vertical + Naomi + Atomiswave
+    allowed = {g.get("name") for g in vertical_menu.iterfind("game")}
+    allowed.update(g.get("name") for g in naomi_nodes)
+    allowed.update(g.get("name") for g in atomis_nodes)
 
-root = final_vertical_menu
+    required_parents = set()
+    for name in allowed:
+        m = index.machines.get(name)
+        if m is not None and m.get("cloneof"):
+            required_parents.add(m.get("cloneof"))
 
-# Pre-compute all categorizations in one pass
-by_genre = defaultdict(list)
-by_manu = defaultdict(list)
-shmup_games = []
-manu_by_genre = defaultdict(lambda: defaultdict(list))
+    total = allowed | required_parents
 
-for g in root.findall("game"):
-    name = g.get("name")
-    genre = g.findtext("genre") or "Unknown"
-    manu = pick_manufacturer(g.findtext("manufacturer"))
-    
-    # Genre vertical split
-    by_genre[clean_filename(genre)].append(g)
-    
-    # Manufacturer vertical split
-    if manu:
-        by_manu[manu].append(g)
-    
-    # Shmups by manufacturer (only if Shoot-'Em-Up)
-    if "Shoot-'Em-Up" in genre:
-        shmup_games.append((manu, g))
-    
-    # Manufacturer -> Genre structure
-    if manu:
-        manu_by_genre[manu][genre].append(g)
+    # liste d'abord (les nœuds sont déplacés avec lxml) ; dernière étape du script
+    selected = [m for m in mame_root.iterfind("machine") if m.get("name") in total]
+    new_root = ET.Element("mame", dict(mame_root.attrib))
+    new_root.extend(selected)
+    write_xml(cfg.clrmame_xml, new_root)
 
-# Write Genre splits
-for genre, games in by_genre.items():
-    menu = ET.Element("menu")
-    for g in games:
-        menu.append(g)
-    write_xml(DIR_GENRES_VERTICAL / f"{genre}.xml", menu, verbose=False)
+    log.info("DAT généré : %d entrées au total.", len(total))
+    log.info("(%d parents cachés ajoutés pour que les sets merged fonctionnent.)",
+             len(required_parents - allowed))
 
-# Write Manufacturer splits
-for manu, games in by_manu.items():
-    menu = ET.Element("menu")
-    for g in games:
-        menu.append(g)
-    write_xml(DIR_MANUFACTURER_VERTICAL / f"{manu}.xml", menu, verbose=False)
-
-# Write Shmups by Manufacturer splits
-shmup_by_manu = defaultdict(list)
-for manu, g in shmup_games:
-    if manu:
-        shmup_by_manu[manu].append(g)
-
-for manu, games in shmup_by_manu.items():
-    menu = ET.Element("menu")
-    for g in games:
-        menu.append(g)
-    write_xml(DIR_MANUFACTURER_SHMUPS / f"{manu}.xml", menu, verbose=False)
-
-# Write Manufacturer -> Genre subfolders
-for manu, genres in manu_by_genre.items():
-    d = DIR_MANUFACTURER_BY_GENRES / manu
-    d.mkdir(exist_ok=True)
-    for genre, games in genres.items():
-        menu = ET.Element("menu")
-        for g in games:
-            menu.append(g)
-        write_xml(d / f"{clean_filename(genre)}.xml", menu, verbose=False)
-
-# Write Naomi genres
-by_genre_naomi = defaultdict(list)
-for g in naomi_menu.findall("game"):
-    by_genre_naomi[clean_filename(g.findtext("genre"))].append(g)
-
-for genre, games in by_genre_naomi.items():
-    menu = ET.Element("menu")
-    for g in games:
-        menu.append(g)
-    write_xml(DIR_GENRES_NAOMI / f"{genre}.xml", menu, verbose=False)
 
 # =================================================
-# 6) FINAL CLEANUP & ORGANIZATION
+# MAIN
 # =================================================
-print("Organizing final output structure...")
+def main():
+    if sys.version_info < (3, 9):
+        sys.exit("Python 3.9+ requis.")
+    logging.basicConfig(level=logging.INFO, format="%(message)s")
+    t0 = time.perf_counter()
+    log.info("Parseur XML : %s", "lxml" if USE_LXML else "xml.etree (installer lxml pour accélérer)")
 
-DIR_FINAL.mkdir(exist_ok=True)
+    cfg = load_config()
+    check_inputs(cfg)
+    cfg.ensure_dirs()
+    patterns = compile_priority(cfg.priority, cfg.strict_manufacturer_match)
 
-# Move MAME Vertical
-m_dir = DIR_FINAL / "MAME"
-m_dir.mkdir(exist_ok=True)
-shutil.copy2(VERTICAL_XML, m_dir / "MAME.xml")
-for f in DIR_GENRES_VERTICAL.glob("*.xml"):
-    shutil.copy2(f, m_dir / f.name)
+    # --- base "All games" (une seule fois, validée + parsée en une passe) ---
+    log.info("Chargement de la base complète pour les lookups...")
+    all_games_root = load_xml(cfg.all_games_xml)
+    if all_games_root is None:
+        log.error("Impossible de charger %s, arrêt.", cfg.all_games_xml.name)
+        sys.exit(1)
+    all_games = {g.get("name"): g for g in all_games_root.iterfind("game")}
 
-# Move Naomi
-n_dir = DIR_FINAL / "Sega Naomi"
-n_dir.mkdir(exist_ok=True)
-shutil.copy2(NAOMI_XML, n_dir / "Sega Naomi.xml")
-for f in DIR_GENRES_NAOMI.glob("*.xml"):
-    shutil.copy2(f, n_dir / f.name)
+    # --- base MAME en mémoire + index en une passe + injection ---
+    mame_root = generate_mame_root(cfg)
+    index = MameIndex(cfg.remove_naomi)
+    for m in mame_root.iterfind("machine"):
+        index.add(m)
+    injected = inject_machines(cfg, mame_root, index)
+    if cfg.write_mame_xml:
+        write_xml(cfg.mame_xml, mame_root)
+        log.info("mame.xml écrit (une seule fois).")
 
-# Move Shmups folder
-s_dir = DIR_FINAL / "Shoot-'Em-Up"
-s_dir.mkdir(exist_ok=True)
-shmup_file = DIR_GENRES_VERTICAL / "Shoot-'Em-Up.xml"
-if shmup_file.exists():
-    shutil.copy2(shmup_file, s_dir / "Shoot-'Em-Up.xml")
-for f in DIR_MANUFACTURER_SHMUPS.glob("*.xml"):
-    shutil.copy2(f, s_dir / f.name)
+    # --- Naomi / Atomiswave ---
+    naomi_nodes = [create_game_node(m, all_games) for m in index.naomi]
+    atomis_nodes = [create_game_node(m, all_games) for m in index.atomiswave]
+    write_menu(cfg.naomi_xml, naomi_nodes)
 
-# Move Manufacturer folders
-for xml_file in DIR_MANUFACTURER_VERTICAL.glob("*.xml"):
-    target = DIR_FINAL / xml_file.stem
-    target.mkdir(exist_ok=True)
-    shutil.copy2(xml_file, target / xml_file.name)
+    # --- base HyperSpin ---
+    hs_root = build_hs_db(cfg, index, injected, all_games)
 
-if DIR_MANUFACTURER_BY_GENRES.exists():
-    shutil.copytree(DIR_MANUFACTURER_BY_GENRES, DIR_FINAL, dirs_exist_ok=True)
+    # --- Vertical (écrit une seule fois, après correction des orphelins) ---
+    vertical_menu = build_vertical(cfg, hs_root, index.vertical)
+    fix_orphan_clones(vertical_menu, index.clone_groups, cfg.orphan_fix_ignore)
+    write_xml(cfg.vertical_xml, vertical_menu)
 
-# =================================================
-# 7) CLRMAMEPRO XML (ROM INTEGRITY FIX)
-# =================================================
-print("Generating MAMEclrmame.xml with Parent Integrity...")
+    # --- découpages, organisation finale, DAT ---
+    export_splits(cfg, vertical_menu, naomi_nodes, patterns)
+    organize_final(cfg)
+    build_clrmame(cfg, mame_root, index, vertical_menu, naomi_nodes, atomis_nodes)
 
-# 1. Games to actually play (Vertical + Naomi + Atomiswave)
-allowed_names = {g.get("name") for g in final_vertical_menu.findall("game")}
-for g in naomi_menu.findall("game"):
-    allowed_names.add(g.get("name"))
+    log.info("TOUTES LES ÉTAPES TERMINÉES en %.1f s", time.perf_counter() - t0)
 
-# 2. Find every parent required by these games
-required_parents = set()
-for machine in mame_root.findall("machine"):
-    name = machine.get("name")
-    if name in allowed_names:
-        p_name = machine.get("cloneof")
-        if p_name:
-            required_parents.add(p_name)
 
-# 3. Combine
-total_set = allowed_names.union(required_parents)
-
-# 4. Build XML
-new_mame_root = ET.Element("mame", mame_root.attrib)
-for machine in mame_root.findall("machine"):
-    if machine.get("name") in total_set:
-        new_mame_root.append(machine)
-
-write_xml(CLRMAME_XML, new_mame_root, verbose=False)
-
-print(f"✔ DAT generated with {len(total_set)} total entries.")
-print(f"  ({len(required_parents - allowed_names)} hidden parents added to ensure Merged sets run correctly.)")
-
-print("\n✔ ALL STEPS COMPLETE")
+if __name__ == "__main__":
+    main()
