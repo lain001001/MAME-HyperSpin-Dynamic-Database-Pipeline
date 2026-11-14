@@ -30,7 +30,6 @@ except ImportError:
 
 log = logging.getLogger("pipeline")
 
-DEFAULT_GENRE = "Shoot-'Em-Up"
 VERTICAL_ROTATIONS = ("90", "270")
 
 
@@ -39,13 +38,20 @@ VERTICAL_ROTATIONS = ("90", "270")
 # =================================================
 @dataclass
 class Config:
-    base: Path = Path(r"D:/!delete/test")
+    base: Path = Path(r"C:\Users\PC\Desktop\Nouveau dossier")
     mame_version: str = "0.289"
 
     # XML (une <machine>) à injecter dans la base MAME
     inject_xmls: list = field(default_factory=lambda: ["ddpsdoj.xml", "ketmatsuri.xml"])
     # Jeux à ajouter depuis "Mame <version> All games.xml"
     games_to_add: list = field(default_factory=lambda: ["sbugger"])
+    # Genre déclaré à la main (rom -> genre) pour les jeux que le script crée lui-même
+    # (injectés, games_to_add, Naomi, Atomiswave, parents ajoutés). Prioritaire sur le reste.
+    # Sans effet sur un jeu déjà présent dans la base HyperSpin (il garde son genre).
+    custom_genres: dict = field(default_factory=lambda: {
+        "ddpsdoj": "Shoot-'Em-Up",
+        "ketmatsuri": "Shoot-'Em-Up",
+    })
 
     priority: list = field(default_factory=lambda: [
         "Capcom", "Cave", "Data East", "Gaelco",
@@ -209,16 +215,67 @@ def write_menu(path, games):
     write_xml(path, menu)
 
 
-def resolve_genre(machine, all_games):
+def resolve_genre(machine, all_games, custom_genres=None):
+    """
+    1. genre déclaré dans custom_genres -> utilisé
+    2. genre présent sur le nœud source -> utilisé tel quel
+    3. jeu trouvé dans "All games"      -> son genre
+    4. sinon                            -> vide (rien n'est inventé)
+    Les jeux sans genre et ceux absents de "All games" sont signalés par
+    report_genre_issues().
+    """
+    custom = (custom_genres or {}).get(machine.get("name"))
+    if custom:
+        return custom
     genre = (machine.findtext("genre") or "").strip()
-    if not genre and all_games is not None:
-        ref = all_games.get(machine.get("name"))
-        if ref is not None:
-            genre = (ref.findtext("genre") or "").strip()
-    return genre or DEFAULT_GENRE
+    if genre:
+        return genre
+    ref = all_games.get(machine.get("name")) if all_games is not None else None
+    if ref is None:
+        return ""
+    return (ref.findtext("genre") or "").strip()
 
 
-def create_game_node(machine, all_games=None):
+def report_genre_issues(nodes, all_games, custom_genres=None):
+    """Signale (sans rien corriger) les jeux sans genre et les jeux absents de All games."""
+    custom_genres = custom_genres or {}
+    no_genre, missing, ignored = [], [], []
+    seen = set()
+    for g in nodes:
+        name = g.get("name")
+        if name in seen:
+            continue
+        seen.add(name)
+        genre = (g.findtext("genre") or "").strip()
+        if name not in all_games and name not in custom_genres:
+            missing.append(name)
+        if not genre:
+            no_genre.append(name)
+        wanted = custom_genres.get(name)
+        if wanted and genre != wanted:
+            ignored.append((name, wanted, genre))
+
+    log.info("--- JEUX SANS GENRE (classés dans Unknown.xml) ---")
+    if no_genre:
+        for name in sorted(no_genre):
+            log.warning("   %s", name)
+    else:
+        log.info("   (aucun)")
+
+    log.info("--- JEUX ABSENTS DE ALL GAMES ---")
+    if missing:
+        for name in sorted(missing):
+            log.warning("   %s", name)
+    else:
+        log.info("   (aucun)")
+
+    if ignored:
+        log.info("--- custom_genres NON APPLIQUÉS (jeu déjà présent dans la base HyperSpin) ---")
+        for name, wanted, genre in sorted(ignored):
+            log.warning("   %s : déclaré '%s', conservé '%s'", name, wanted, genre)
+
+
+def create_game_node(machine, all_games=None, custom_genres=None):
     """
     Convertit une <machine> MAME ou un <game> HyperSpin en nœud <game> HyperSpin.
     cloneof est lu en attribut (MAME) OU en sous-élément (HyperSpin).
@@ -227,7 +284,7 @@ def create_game_node(machine, all_games=None):
     g = ET.Element("game", name=name, index="", image="")
     for tag in ("description", "manufacturer", "year"):
         ET.SubElement(g, tag).text = machine.findtext(tag) or ""
-    ET.SubElement(g, "genre").text = resolve_genre(machine, all_games)
+    ET.SubElement(g, "genre").text = resolve_genre(machine, all_games, custom_genres)
     cloneof = machine.get("cloneof") or (machine.findtext("cloneof") or "").strip()
     ET.SubElement(g, "cloneof").text = cloneof
     ET.SubElement(g, "crc").text = ""
@@ -343,7 +400,7 @@ def prepare_hs_source(cfg):
     return cfg.hs_backup
 
 
-def fix_missing_parents(hs_root, games, all_games):
+def fix_missing_parents(hs_root, games, all_games, custom_genres=None):
     """Ajoute les parents manquants, de façon itérative (parents de parents), sans doublon."""
     added = []
     pending = list(games.values())
@@ -357,7 +414,7 @@ def fix_missing_parents(hs_root, games, all_games):
             log.warning("  Parent '%s' (requis par '%s') absent de %s",
                         parent, node.get("name"), "All games")
             continue
-        new = create_game_node(src, all_games)
+        new = create_game_node(src, all_games, custom_genres)
         hs_root.append(new)
         games[parent] = new          # le nœud créé, pas l'élément source
         added.append((node.get("name"), parent))
@@ -393,12 +450,12 @@ def build_hs_db(cfg, index, injected, all_games):
 
     # A) jeux injectés
     for m in injected:
-        add(create_game_node(m, all_games))
+        add(create_game_node(m, all_games, cfg.custom_genres))
     # B) Naomi  C) Atomiswave
     for m in index.naomi:
-        add(create_game_node(m, all_games))
+        add(create_game_node(m, all_games, cfg.custom_genres))
     for m in index.atomiswave:
-        add(create_game_node(m, all_games))
+        add(create_game_node(m, all_games, cfg.custom_genres))
 
     # D) jeux personnalisés
     log.info("Ajout des jeux de games_to_add...")
@@ -406,14 +463,14 @@ def build_hs_db(cfg, index, injected, all_games):
         src = all_games.get(rom)
         if src is None:
             log.error("  '%s' INTROUVABLE dans %s", rom, cfg.all_games_xml.name)
-        elif add(create_game_node(src, all_games)):
+        elif add(create_game_node(src, all_games, cfg.custom_genres)):
             log.info("  '%s' ajouté.", rom)
         else:
             log.warning("  '%s' existe déjà, ignoré.", rom)
 
     # E) parents manquants
     log.info("Vérification des parents manquants...")
-    added = fix_missing_parents(hs_root, games, all_games)
+    added = fix_missing_parents(hs_root, games, all_games, cfg.custom_genres)
     for child, parent in added:
         log.info("  parent '%s' ajouté (requis par '%s')", parent, child)
     if not added:
@@ -625,8 +682,8 @@ def main():
         log.info("mame.xml écrit (une seule fois).")
 
     # --- Naomi / Atomiswave ---
-    naomi_nodes = [create_game_node(m, all_games) for m in index.naomi]
-    atomis_nodes = [create_game_node(m, all_games) for m in index.atomiswave]
+    naomi_nodes = [create_game_node(m, all_games, cfg.custom_genres) for m in index.naomi]
+    atomis_nodes = [create_game_node(m, all_games, cfg.custom_genres) for m in index.atomiswave]
     write_menu(cfg.naomi_xml, naomi_nodes)
 
     # --- base HyperSpin ---
@@ -636,6 +693,9 @@ def main():
     vertical_menu = build_vertical(cfg, hs_root, index.vertical)
     fix_orphan_clones(vertical_menu, index.clone_groups, cfg.orphan_fix_ignore)
     write_xml(cfg.vertical_xml, vertical_menu)
+
+    # --- signalement des jeux sans genre / absents de All games (rien n'est corrigé) ---
+    report_genre_issues(list(vertical_menu.iterfind("game")) + naomi_nodes, all_games, cfg.custom_genres)
 
     # --- découpages, organisation finale, DAT ---
     export_splits(cfg, vertical_menu, naomi_nodes, patterns)
