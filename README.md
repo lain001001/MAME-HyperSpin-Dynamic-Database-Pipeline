@@ -1,157 +1,205 @@
 # MAME → HyperSpin Dynamic Database Pipeline
 
-Fully automated Python pipeline that builds a complete **MAME →
-HyperSpin** database ecosystem with dynamic XML injection, vertical
-filtering, Naomi support, manufacturer splits, and clrmamepro export.
+Python pipeline that builds a complete **MAME → HyperSpin** database ecosystem from a fresh `mame -listxml`: dynamic XML injection, vertical filtering, Sega Naomi / Atomiswave support, genre and manufacturer splits, and a ClrMamePro DAT.
 
-Designed for advanced arcade cabinet setups, vertical builds, and
-curated shmup collections.
+Designed for vertical arcade cabinets and curated shmup collections.
 
-------------------------------------------------------------------------
+---
 
-## What This Project Does
+## What it does
 
-This script automatically:
+- Runs `mame.exe -listxml` and parses the output in memory
+- Injects custom machine XMLs (games missing from MAME) before processing
+- Merges everything into a clean, sorted HyperSpin database
+- Adds missing parents automatically (recursively, no duplicates)
+- Builds a **Vertical-only** database (`rotate` 90 / 270) and fixes orphan clones
+- Extracts vertical titles from **Sega Naomi** and **Atomiswave**
+- Splits databases by **genre** and by **manufacturer** (priority-based)
+- Builds shmup-only manufacturer folders
+- Exports a filtered **ClrMamePro DAT** with parent integrity
+- Organizes everything into a ready-to-use `!Final` folder structure
 
--   Generates fresh XML from MAME
--   Injects custom machine XMLs before processing
--   Merges everything into a clean HyperSpin database
--   Builds Vertical-only databases (rotate 90 / 270)
--   Extracts vertical titles from Sega Naomi & Atomiswave
--   Splits databases by Genre
--   Splits databases by Manufacturer (priority-based detection)
--   Builds Shmup-only manufacturer folders
--   Exports a filtered XML for clrmamepro
--   Organizes everything into a final ready-to-use folder structure
-
-This is a complete end-to-end arcade XML automation pipeline.
-
-------------------------------------------------------------------------
-
-# Features
-
-## Automatic MAME XML Generation
-
-Runs:
-
-    mame.exe -listxml
-
-Then parses and rebuilds everything dynamically.
-
-------------------------------------------------------------------------
-
-## Dynamic Game Injection
-
-Supports custom XML injection before database processing.
-
-Example: - ddpsdoj.xml - ketmatsuri.xml
-
-Injected games automatically: - Gain vertical detection - Merge into
-HyperSpin - Appear in manufacturer/genre splits - Get included in
-clrmamepro export
-
-------------------------------------------------------------------------
-
-## Vertical Filtering Engine
-
-Filters games based on:
-
-    <display rotate="90">
-    <display rotate="270">
-
-Removes unwanted titles via blacklist.
-
-Outputs: - MAME Vertical.xml - Vertical Genre splits - Vertical
-Manufacturer splits
-
-------------------------------------------------------------------------
-
-## Naomi & Atomiswave Auto Builder
-
-Automatically extracts vertical games from: - naomi.cpp -
-dc_atomiswave.cpp
-
-Outputs: - Sega Naomi vertical database - Genre splits for Naomi -
-Integrated into main HyperSpin DB
-
-------------------------------------------------------------------------
-
-## Manufacturer Intelligence
-
-Priority manufacturers:
-
-Capcom\
-Cave\
-Data East\
-Gaelco\
-Irem\
-Kaneko\
-Konami\
-Namco\
-Nichibutsu\
-Nintendo\
-Sega\
-Seibu Kaihatsu\
-SNK\
-Taito
-
-Smart detection handles: - Company A / Company B - Company A & Company
-B - (license) cleanup
-
-------------------------------------------------------------------------
-
-## Shoot-'Em-Up Smart Splits
-
-Automatically generates: - Vertical shmups - Shmups by manufacturer -
-Manufacturer → Genre subfolders
-
-------------------------------------------------------------------------
-
-## Final Clean Folder Structure
-
-!Final/ ├── MAME/ ├── Sega Naomi/ ├── Shoot-'Em-Up/ ├── Capcom/ ├──
-Cave/ ├── SNK/ └── etc...
-
-Fully organized for HyperSpin wheels.
-
-------------------------------------------------------------------------
-
-## Special Logic
-
-### DDP Parent/Clone Restructure
-
--   ddpdojblk becomes parent
--   ddp3 becomes clone
--   All sub-clones re-linked automatically
-
-Fully dynamic inside HyperSpin XML.
-
-------------------------------------------------------------------------
+---
 
 ## Requirements
 
--   Python 3.10+
--   MAME executable
--   HyperSpin base XML database
--   All Games master XML (for genre lookup)
+- Python **3.9+**
+- `mame.exe` (MAME or GroovyMAME, see [Notes](#notes))
+- `lxml` *(optional, much faster parsing)*: `pip install lxml`
 
-------------------------------------------------------------------------
+### Input files
+
+All files live in the working folder (`base`).
+
+| File | Required | Purpose |
+|---|---|---|
+| `mame.exe` | Yes | Source of the full machine list (`-listxml`) |
+| `Mame <version>.xml` | Yes | Your HyperSpin base database (with genres) |
+| `Mame <version> All games.xml` | Yes | Master database: genre lookup, `games_to_add`, missing parents |
+| `ddpsdoj.xml`, `ketmatsuri.xml`, … | No | Custom machines to inject (see `inject_xmls`) |
+
+`Mame <version>.xml` and `Mame <version> All games.xml` are HyperSpin-format files (`<menu><game>` with a `genre` field), which `-listxml` cannot produce. They must match the version of your `mame.exe`.
+
+Download them here: <http://r0man0.free.fr/index.php/download-mame-xml-lists-and-generator/>
+
+(`mame.xml`, the output of `mame -listxml`, is generated by the script itself.)
+
+---
+
+## Usage
+
+```
+python main.py
+```
+
+If any required file is missing, the script stops right away with an error message.
+
+---
 
 ## Configuration
 
-Inside script:
+Defaults are defined in the `Config` class at the top of the script. To override them without touching the code, create a `pipeline_config.json` next to the script. Only the keys you want to change are needed:
 
-    BASE = Path(r"C:\YourPath")
+```json
+{
+  "base": "D:/path/to/workdir",
+  "mame_version": "0.289",
+  "inject_xmls": ["ddpsdoj.xml", "ketmatsuri.xml"],
+  "games_to_add": ["sbugger"],
+  "custom_genres": {"ddpsdoj": "Shoot-'Em-Up", "ketmatsuri": "Shoot-'Em-Up"}
+}
+```
 
-You can configure: - Injected XML list - Manufacturer priority -
-Blacklisted games - Blacklisted Naomi titles
+| Option | Description |
+|---|---|
+| `base` | Working folder (inputs and outputs) |
+| `mame_version` | Used in file names (`Mame 0.289.xml`, …) |
+| `inject_xmls` | Custom machine XMLs to inject into the MAME database |
+| `games_to_add` | ROM names to add from `Mame <version> All games.xml` |
+| `custom_genres` | Genre declared by hand (`rom` → genre) for games the script creates itself (see [Genres](#genres)) |
+| `priority` | Manufacturers recognized for splits, in priority order |
+| `remove_games` | Blacklist for the Vertical database |
+| `remove_naomi` | Blacklist for the Naomi database |
+| `ddp_new_parent` / `ddp_old_parent` | Parent/clone swap applied to the HyperSpin XML |
+| `write_mame_xml` | Write `mame.xml` to disk (otherwise everything stays in memory) |
+| `use_hs_backup` | Use `Mame <version>.orig.xml` as the source on every run (see below) |
+| `strict_manufacturer_match` | Whole-word manufacturer matching (`false` = plain substring) |
 
-------------------------------------------------------------------------
+---
 
-## Use Case
+## Features
 
-Perfect for: - Vertical-only arcade cabinets - Shmup-focused builds -
-Curated manufacturer wheels - Clean HyperSpin setups - Advanced ROM
-management workflows
+### Dynamic game injection
 
-------------------------------------------------------------------------
+Each file in `inject_xmls` is a `<machine>` (or a `<mame>` root containing machines). Injected games:
+
+- are added to the MAME database before indexing, so they get vertical detection
+- are merged into the HyperSpin database
+- appear in the Vertical, manufacturer and genre splits
+- are included in the ClrMamePro DAT
+
+If the machine already exists in `mame -listxml`, the injection is skipped with a warning. Missing files are skipped too.
+
+For a custom XML that should be a standalone parent:
+
+- no `cloneof` attribute on the `<machine>`
+- no `merge` attribute on the `<rom>` entries
+- a `<display rotate="90">` or `"270"`, otherwise the game is not detected as vertical
+
+### Vertical filtering
+
+A game is kept if it, or its parent, has a display rotated 90° or 270°, unless it is in `remove_games`. Orphan clones (parent not in the Vertical database) are promoted: a single clone becomes a parent, several clones are regrouped under the first one.
+
+### Naomi & Atomiswave
+
+Vertical games are extracted from `naomi.cpp` and `dc_atomiswave.cpp`. Naomi gets its own database and genre splits (`remove_naomi` excluded). Both are merged into the main HyperSpin database and the DAT.
+
+### Manufacturer detection
+
+The manufacturer field is matched against the `priority` list, in order, and the first match wins. For example, `Taito / Capcom` is classified as Capcom because Capcom comes first in the list. Matching is whole-word by default.
+
+Default priority: Capcom, Cave, Data East, Gaelco, Irem, Kaneko, Konami, Namco, Nichibutsu, Nintendo, Sega, Seibu Kaihatsu, SNK, Taito.
+
+### Genres
+
+Genres come from the HyperSpin databases (`Mame <version> All games.xml` is the reference). Nothing is guessed: the script never assigns a default genre.
+
+The genre of a game created by the script (injected games, `games_to_add`, Naomi, Atomiswave, added parents) is resolved in this order:
+
+1. `custom_genres`, if the game is declared there
+2. the `<genre>` of the source node, if any
+3. the genre found in `All games`
+4. otherwise empty, and the game ends up in `Unknown.xml`
+
+`custom_genres` is the place to give a genre to games that are not in `All games`, such as injected games:
+
+```json
+"custom_genres": {"ddpsdoj": "Shoot-'Em-Up", "ketmatsuri": "Shoot-'Em-Up"}
+```
+
+A game that is already in your HyperSpin base keeps the genre it has there. A genre declared in `custom_genres` for such a game is not applied, and the script says so.
+
+At the end of each run, the script lists as warnings:
+
+- games with **no genre**
+- games **absent from `All games`** (except those declared in `custom_genres`)
+- `custom_genres` entries that were **not applied** because the game was already in the base
+
+Nothing is corrected automatically, so you can fix these in the XML or in `custom_genres`.
+
+### DDP parent/clone restructure
+
+Applied to the HyperSpin XML only:
+
+- `ddpdojblk` becomes the parent
+- `ddp3` becomes its clone
+- all other clones of `ddp3` are re-linked to `ddpdojblk`
+
+The ClrMamePro DAT keeps MAME's official parent/clone relationships.
+
+### Safe re-runs
+
+The first run copies your HyperSpin base to `Mame <version>.orig.xml`. Every run then starts from this original and rewrites `Mame <version>.xml`, so running the script twice gives the same result. To start from a new base file, delete the `.orig.xml`.
+
+### ClrMamePro DAT
+
+`MAMEclrmame.xml` contains the Vertical games, Naomi and Atomiswave, plus every parent they require, so merged sets work.
+
+---
+
+## Output
+
+```
+<base>/
+├── mame.xml                          (optional)
+├── Mame <version>.xml                (rewritten, sorted)
+├── Mame <version>.orig.xml           (backup of your original)
+├── MAMEclrmame.xml
+└── databases/
+    ├── Mame <version> Vertical.xml
+    ├── Naomi_Vertical.xml
+    ├── genres - vertical/
+    ├── genres - naomi/
+    ├── manufacturer - vertical/
+    ├── manufacturer - shmups/
+    ├── manufacturer - vertical by genres/
+    └── !Final/
+        ├── MAME/             (MAME.xml + genre XMLs)
+        ├── Sega Naomi/       (Sega Naomi.xml + genre XMLs)
+        ├── Shoot-'Em-Up/     (Shoot-'Em-Up.xml + per-manufacturer shmups)
+        ├── Capcom/           (Capcom.xml + per-genre XMLs)
+        ├── Cave/
+        ├── SNK/
+        └── ...
+```
+
+---
+
+## Notes
+
+- **GroovyMAME**: it uses the same drivers and ROM sets as MAME of the same version, so the pipeline works with it. Make sure `mame.exe` is the GroovyMAME executable (or adjust the path) and that its version matches your two HyperSpin XML files.
+- The script only filters the games present in your HyperSpin base. A vertical game missing from `Mame <version>.xml` will not appear unless you add it with `games_to_add`.
+- Games that already exist in the HyperSpin base (injected games, Naomi, Atomiswave, `games_to_add`) are not added again, and the existing entry is kept as is. If you ran an older version of this script on your base, those games may already be in it: start from the original file from your source (and delete the `.orig.xml`).
+- The HyperSpin `<header>` of the base file is not preserved in the output.
+- Output folders (including `!Final`) are not cleaned between runs, so old files from a previous run can remain.
+- Parent/clone changes affect the HyperSpin XML only. MAME still resolves ROMs through its official parent/clone structure.
